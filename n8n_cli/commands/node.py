@@ -111,7 +111,12 @@ def add(
         str | None, typer.Option("--position", help="'x,y' pair; auto-computed when omitted.")
     ] = None,
     type_version: Annotated[
-        float | None, typer.Option("--type-version", help="Override typeVersion (default 1).")
+        float | None,
+        typer.Option(
+            "--type-version",
+            help="Override typeVersion. When omitted, resolves the latest known version "
+            "from the instance's node-type catalog (falling back to a built-in map).",
+        ),
     ] = None,
     disabled: Annotated[
         bool, typer.Option("--disabled", help="Create node in disabled state.")
@@ -139,14 +144,23 @@ def add(
         except ValueError as exc:
             raise UserError(f"--position parse error: {exc}") from exc
 
-    _, inst = store.resolve_active(instance_name)
-    with Transport(inst, verbose=verbose) as t:
+    name_key, inst = store.resolve_active(instance_name)
+    with Transport(inst, instance_name=name_key, verbose=verbose) as t:
+        effective_tv = type_version
+        if effective_tv is None:
+            from n8n_cli.api.frontend import FrontendApi
+            from n8n_cli.core.node_types import resolve_latest_version
+
+            effective_tv = resolve_latest_version(
+                node_type, fapi=FrontendApi(t), instance_name=name_key
+            )
+
         patcher = WorkflowPatcher(PublicApi(t), workflow)
         new = patcher.add_node(
             node_type=node_type,
             name=name,
             parameters=params_obj,
-            type_version=type_version,
+            type_version=effective_tv,
             position=position_list,
             after=after,
             disabled=disabled,

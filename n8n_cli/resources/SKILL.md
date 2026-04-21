@@ -78,6 +78,34 @@ n8n-cli execution-data get <NEW_EID> --node <N>        # 9. verify
 - `n8n-cli workflow export <id> --file x.json` — snapshot for git / manual
   inspection.
 
+## Node typeVersion — handled automatically
+
+`n8n-cli node add` omits `--type-version` by default. The CLI queries the
+instance's `/types/nodes.json` catalog once per day and picks the latest
+version for each node type (cached at
+`~/.config/n8n-cli/cache/node-types-<instance>.yaml`). A built-in map of
+common nodes ensures sane defaults even offline.
+
+You only need `--type-version` when you specifically want a legacy version
+(e.g. to match an existing workflow that was authored against `httpRequest`
+v3). Parameter shapes are version-specific — always author params for the
+latest version unless you set `--type-version` explicitly.
+
+## Cross-workflow orchestration
+
+Two patterns work; pick by intent:
+
+- **Sub-workflow call** via `n8n-nodes-base.executeWorkflow` + child's
+  `executeWorkflowTrigger`. Simplest, runs in the same execution context.
+  Known to misbehave on some forked n8n builds — if it throws "Workflow
+  does not exist", switch to the webhook pattern below.
+- **Webhook fan-out**: child has `n8n-nodes-base.webhook` trigger with a
+  unique `path`; parent has `n8n-nodes-base.httpRequest` node POSTing to
+  `https://<instance>/webhook/<path>`. Child must be published (`workflow
+  publish <id>`) so the production webhook is registered. Works on any
+  n8n build and gives you parallel fan-out by adding multiple HTTP nodes
+  from the same upstream.
+
 ## Common patterns
 
 **Inspect a node's last run**

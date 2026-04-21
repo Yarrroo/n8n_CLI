@@ -266,6 +266,68 @@ class FrontendApi:
         body = self.t.get("/rest/workflows", **params)
         return cast(list[dict[str, Any]], body.get("data") or [])
 
+    # --- node-type catalog --------------------------------------------
+
+    def fetch_node_types_catalog(self) -> list[dict[str, Any]]:
+        """GET /types/nodes.json. Returns the full node-type catalog.
+
+        The response is a list of node descriptor objects; each has a
+        `name` (e.g. ``n8n-nodes-base.httpRequest``) and a `version`
+        field that's either an int/float or a list of ints/floats.
+        Multiple entries per node type may exist when n8n keeps legacy
+        versions around.
+        """
+        # Transport treats /types/ as a non-standard path; use raw client.
+        client = self.t._client
+        import httpx as _httpx
+
+        try:
+            resp = client.get("/types/nodes.json")
+        except _httpx.HTTPError as exc:
+            raise ApiError(
+                f"network error fetching node-types: {exc}", backend="frontend"
+            ) from exc
+        if resp.status_code != 200:
+            raise ApiError(
+                f"frontend /types/nodes.json returned {resp.status_code}",
+                status_code=resp.status_code,
+                backend="frontend",
+            )
+        data = resp.json()
+        if not isinstance(data, list):
+            raise ApiError(
+                "frontend /types/nodes.json did not return a list", backend="frontend"
+            )
+        return cast(list[dict[str, Any]], data)
+
+
+def latest_node_versions(catalog: list[dict[str, Any]]) -> dict[str, float]:
+    """Collapse a node-type catalog to ``{node_type: latest_version}``.
+
+    Handles descriptors that declare `version` as int, float, or list.
+    When a node type appears multiple times, the highest version wins.
+    """
+    latest: dict[str, float] = {}
+    for entry in catalog:
+        name = entry.get("name")
+        if not isinstance(name, str):
+            continue
+        version = entry.get("version")
+        candidates: list[float] = []
+        if isinstance(version, (int, float)):
+            candidates.append(float(version))
+        elif isinstance(version, list):
+            for v in version:
+                if isinstance(v, (int, float)):
+                    candidates.append(float(v))
+        if not candidates:
+            continue
+        best = max(candidates)
+        prev = latest.get(name)
+        if prev is None or best > prev:
+            latest[name] = best
+    return latest
+
 
 def iter_folder_tree(trees: list[dict[str, Any]]) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield (path, folder_node) across the subtrees returned by /tree.
