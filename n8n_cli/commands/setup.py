@@ -187,9 +187,7 @@ def status() -> None:
     skill_path = home / "skills" / _SKILL_DIR_NAME / "SKILL.md"
     slash_path = home / "commands" / _SLASH_NAME
     claude_md = home / "CLAUDE.md"
-    claude_md_block = (
-        claude_md.exists() and _MARKER_BEGIN in claude_md.read_text(encoding="utf-8")
-    )
+    claude_md_block = claude_md.exists() and _MARKER_BEGIN in claude_md.read_text(encoding="utf-8")
 
     emit(
         {

@@ -570,9 +570,7 @@ def delete(
 
 @app.command("move")
 def move(
-    workflow_id: Annotated[
-        str | None, typer.Argument(help="Workflow ID (or pass --id).")
-    ] = None,
+    workflow_id: Annotated[str | None, typer.Argument(help="Workflow ID (or pass --id).")] = None,
     id_opt: Annotated[
         str | None, typer.Option("--id", help="Workflow ID (alternative to positional arg).")
     ] = None,
