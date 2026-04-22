@@ -23,6 +23,9 @@ _UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f
 Schema = Any  # recursive: str | dict[str, "Schema"] | {"oneOf": [Schema, ...]}
 
 _UNION_MERGE_THRESHOLD = 0.7  # ≥70% shared keys → merge with optional marks
+_MAX_ONEOF_VARIANTS = 5  # truly heterogeneous payloads collapse past this width
+_MAX_INFERENCE_SAMPLE = 20  # sample this many items for schema inference
+_MAX_DICT_KEYS = 40  # cap wide objects to avoid pathological schemas
 
 
 def infer_schema(items: list[Any]) -> Schema:
@@ -31,11 +34,15 @@ def infer_schema(items: list[Any]) -> Schema:
     Returns:
       - "empty" if the list is empty
       - a single shape if all items share it (or can be merged)
-      - {"oneOf": [shape, ...]} for truly incompatible shapes
+      - {"oneOf": [shape, ...]} for truly incompatible shapes (capped width)
+
+    Large lists are sampled: inferring over every item is O(N) and rarely
+    adds information once shapes stabilize.
     """
     if not items:
         return "empty"
-    shapes = [_shape_of(x) for x in items]
+    sample = items if len(items) <= _MAX_INFERENCE_SAMPLE else items[:_MAX_INFERENCE_SAMPLE]
+    shapes = [_shape_of(x) for x in sample]
     return _merge_shapes(shapes)
 
 
@@ -60,6 +67,11 @@ def _shape_of(value: Any) -> Schema:
         inner = _merge_shapes([_shape_of(x) for x in value])
         return f"array<{_render(inner)}>" if isinstance(inner, str) else {"array": inner}
     if isinstance(value, dict):
+        keys = list(value.keys())
+        if len(keys) > _MAX_DICT_KEYS:
+            shaped = {k: _shape_of(value[k]) for k in keys[:_MAX_DICT_KEYS]}
+            shaped["_more_keys"] = f"{len(keys) - _MAX_DICT_KEYS} additional keys truncated"
+            return shaped
         return {k: _shape_of(v) for k, v in value.items()}
     return type(value).__name__
 
@@ -100,6 +112,11 @@ def _merge_shapes(shapes: list[Schema]) -> Schema:
         if merged is not None:
             return merged
 
+    # Cap union width — many variants usually signal truly heterogeneous data,
+    # where listing every variant inflates the schema without helping a reader.
+    if len(uniq) > _MAX_ONEOF_VARIANTS:
+        head = uniq[:_MAX_ONEOF_VARIANTS]
+        return {"oneOf": head, "_more_variants": len(uniq) - _MAX_ONEOF_VARIANTS}
     return {"oneOf": uniq}
 
 

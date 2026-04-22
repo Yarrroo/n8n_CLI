@@ -19,6 +19,88 @@ def test_empty_items_returns_zero_count_no_sample() -> None:
     assert out["truncated"] is False
 
 
+def test_pathologically_heterogeneous_payload_stays_within_budget() -> None:
+    """Regression: on the Sports Screener workflow one node emitted 22 items
+    with deeply nested, wildly different shapes. Schema inference ballooned
+    to 33 MB and the final output was 69 MB — enough to destroy an LLM's
+    context window. This test simulates that pattern and asserts the
+    budget is respected.
+    """
+    import string
+
+    def big_dict(seed: int) -> dict[str, object]:
+        return {
+            "json": {
+                "body": [
+                    {
+                        f"k_{seed}_{i}_{letter}": f"v_{seed}_{i}_{letter}" * 100
+                        for letter in string.ascii_lowercase[:15]
+                        for i in range(30)
+                    }
+                ],
+                "status": seed * 100,
+            }
+        }
+
+    items = [big_dict(i) for i in range(22)]
+    raw_bytes = _bytes_of(items)
+    assert raw_bytes > 1_000_000, "test fixture must exceed 1 MB"
+
+    out = summarize_items(items, SummarizeOptions())  # default max_bytes=1024
+    serialized = _bytes_of(out)
+    assert serialized <= 1024, (
+        f"summarizer must stay under budget even on heterogeneous payloads; got {serialized} bytes"
+    )
+    assert out["item_count"] == 22
+    assert out["truncated"] is True
+
+
+def test_oneof_variants_capped_to_5() -> None:
+    """Schema inference on truly heterogeneous primitives shouldn't explode."""
+    from n8n_cli.output.schema_infer import infer_schema
+
+    # 10 fundamentally incompatible shapes: strings + ints + dicts + arrays
+    items: list[object] = [
+        "str",
+        42,
+        True,
+        1.5,
+        [1, 2],
+        ["a"],
+        {"a": 1},
+        {"b": 2},
+        {"c": 3, "d": 4},
+        None,
+    ]
+    schema = infer_schema(items)
+    assert isinstance(schema, dict) and "oneOf" in schema
+    assert len(schema["oneOf"]) <= 5
+    if len(items) > len(schema["oneOf"]):
+        assert "_more_variants" in schema
+
+
+def test_wide_dict_keys_truncated_in_schema() -> None:
+    """Pathologically wide dicts (1000s of keys) should get clipped."""
+    from n8n_cli.output.schema_infer import infer_schema
+
+    wide = {f"key_{i}": i for i in range(200)}
+    schema = infer_schema([wide])
+    # After cap (_MAX_DICT_KEYS=40), the dict shape has ≤40 keys + marker.
+    assert isinstance(schema, dict)
+    assert len(schema) <= 41
+    assert "_more_keys" in schema
+
+
+def test_schema_inference_samples_items_not_entire_list() -> None:
+    """On very long lists, schema inference must sample, not iterate every item."""
+    from n8n_cli.output.schema_infer import infer_schema
+
+    # All-identical shape → schema is stable; just ensures no perf blow-up.
+    items = [{"id": i, "email": f"u{i}@x.com"} for i in range(10_000)]
+    schema = infer_schema(items)
+    assert schema == {"id": "integer", "email": "string"}
+
+
 def test_default_returns_one_sample() -> None:
     items = [{"id": i} for i in range(5)]
     out = summarize_items(items)

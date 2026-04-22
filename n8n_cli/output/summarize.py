@@ -180,7 +180,47 @@ def _binary_meta(blob: Any) -> dict[str, Any]:
 
 
 def _enforce_budget(summary: Summary, max_bytes: int) -> None:
-    """Trim `summary.sample` until it fits the budget. Schema is kept regardless."""
+    """Trim `summary.sample`, then collapse `summary.schema` if still over budget.
+
+    Strategy:
+      1. Drop sample items one-by-one (schema is usually cheap, sample is big).
+      2. If still over budget after sample is empty, replace the schema with
+         a placeholder that preserves top-level field names but hides leaf
+         types (or drops schema entirely if top-level itself is massive).
+    """
     while _byte_size(summary.to_dict()) > max_bytes and summary.sample:
         summary.sample.pop()
         summary.truncated = True
+
+    if _byte_size(summary.to_dict()) <= max_bytes:
+        return
+
+    # Sample is empty and we're still over budget → schema is the problem.
+    # This happens on pathologically heterogeneous payloads (e.g. 22 deeply
+    # nested HTTP responses with varying shapes). The CLI must not bleed
+    # megabytes into the caller's context, so we hard-collapse the schema.
+    schema_bytes = _byte_size(summary.schema)
+    summary.schema = _collapse_schema(summary.schema, schema_bytes)
+    summary.truncated = True
+
+
+def _collapse_schema(schema: Any, original_bytes: int) -> Any:
+    """Reduce a huge schema to a compact placeholder.
+
+    Preserves top-level field names where possible so the caller still
+    knows what the payload looked like, and always emits a marker with
+    the original size so downstream code can note it needs ``--path`` or
+    ``--head`` to inspect further.
+    """
+    marker = {
+        "_schema_elided": True,
+        "_original_bytes": original_bytes,
+        "hint": "schema too large to show; use --path or --head 1 to inspect",
+    }
+    if isinstance(schema, dict) and "oneOf" not in schema:
+        # Keep top-level keys only, replace leaves with "…".
+        top: dict[str, Any] = dict.fromkeys(list(schema.keys())[:20], "…")
+        if len(schema) > 20:
+            top["_more_keys"] = f"{len(schema) - 20} additional keys truncated"
+        return {**marker, "top_level_keys": top}
+    return marker
