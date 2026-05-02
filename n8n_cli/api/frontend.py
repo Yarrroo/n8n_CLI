@@ -12,7 +12,7 @@ from typing import Any, cast
 
 import httpx
 
-from n8n_cli.api.errors import ApiError, AuthError
+from n8n_cli.api.errors import ApiError, AuthError, MfaRequiredError
 from n8n_cli.api.transport import Transport, _extract_cookie
 from n8n_cli.config import sessions
 
@@ -23,21 +23,50 @@ class FrontendApi:
 
     # --- session -------------------------------------------------------
 
-    def login(self, email: str, password: str) -> dict[str, Any]:
+    def login(
+        self,
+        email: str,
+        password: str,
+        *,
+        mfa_code: str | None = None,
+        mfa_recovery_code: str | None = None,
+    ) -> dict[str, Any]:
         """POST /rest/login. Stores cookie + personal_project_id in the session file.
 
-        Returns the decoded user record.
+        Returns the decoded user record. When the account has MFA enabled, pass
+        either ``mfa_code`` (TOTP, 6 digits) or ``mfa_recovery_code``. Without
+        one, n8n returns 401 + ``{"code":998,"message":"MFA Error"}`` which we
+        surface as :class:`MfaRequiredError`.
         """
+        payload: dict[str, Any] = {"emailOrLdapLoginId": email, "password": password}
+        if mfa_code:
+            payload["mfaCode"] = mfa_code
+        if mfa_recovery_code:
+            payload["mfaRecoveryCode"] = mfa_recovery_code
+
         client = self.t._client  # direct — we need the Set-Cookie header
         try:
             resp = client.post(
                 "/rest/login",
-                json={"emailOrLdapLoginId": email, "password": password},
+                json=payload,
                 headers={"content-type": "application/json", "accept": "application/json"},
             )
         except httpx.HTTPError as exc:
             raise ApiError(f"network error during login: {exc}", backend="frontend") from exc
         if resp.status_code == 401:
+            # Distinguish MFA-required (code 998) from bad-credentials and
+            # bad-MFA-code so the CLI can prompt or report precisely.
+            body: dict[str, Any] = {}
+            try:
+                body = resp.json() if resp.content else {}
+            except ValueError:
+                body = {}
+            if body.get("code") == 998:
+                raise MfaRequiredError(
+                    "MFA required: pass --mfa-code <TOTP> or --mfa-recovery-code <code>"
+                )
+            if mfa_code or mfa_recovery_code:
+                raise AuthError("invalid MFA code or recovery code")
             raise AuthError("invalid email or password")
         if resp.status_code != 200:
             raise ApiError(

@@ -12,7 +12,7 @@ from typing import Annotated, Any
 
 import typer
 
-from n8n_cli.api.errors import ApiError, AuthError, UserError
+from n8n_cli.api.errors import ApiError, AuthError, MfaRequiredError, UserError
 from n8n_cli.api.frontend import FrontendApi
 from n8n_cli.api.public import PublicApi
 from n8n_cli.api.transport import Transport
@@ -72,6 +72,21 @@ def login(
     password_stdin: Annotated[
         bool, typer.Option("--password-stdin", help="Read password from stdin (for CI).")
     ] = False,
+    mfa_code: Annotated[
+        str | None,
+        typer.Option(
+            "--mfa-code",
+            help="6-digit TOTP code (when account has MFA enabled). "
+            "Falls back to $N8N_MFA_CODE; prompts interactively if neither is set.",
+        ),
+    ] = None,
+    mfa_recovery_code: Annotated[
+        str | None,
+        typer.Option(
+            "--mfa-recovery-code",
+            help="MFA recovery code (one-time backup code). Falls back to $N8N_MFA_RECOVERY_CODE.",
+        ),
+    ] = None,
     verbose: VerboseOpt = False,
 ) -> None:
     """Log in to the frontend API; persist the session cookie."""
@@ -84,8 +99,33 @@ def login(
         )
     password = _read_password(password_stdin, resolved_email)
 
+    if mfa_code and mfa_recovery_code:
+        raise UserError("--mfa-code and --mfa-recovery-code are mutually exclusive")
+    resolved_mfa_code = mfa_code or os.environ.get("N8N_MFA_CODE") or None
+    resolved_mfa_recovery = mfa_recovery_code or os.environ.get("N8N_MFA_RECOVERY_CODE") or None
+
     with Transport(inst, instance_name=name, verbose=verbose) as t:
-        user = FrontendApi(t).login(resolved_email, password)
+        fapi = FrontendApi(t)
+        try:
+            user = fapi.login(
+                resolved_email,
+                password,
+                mfa_code=resolved_mfa_code,
+                mfa_recovery_code=resolved_mfa_recovery,
+            )
+        except MfaRequiredError:
+            # Account has MFA enabled and no code was supplied. If we can
+            # prompt, do so; otherwise re-raise so CI sees a clean error.
+            if not sys.stdin.isatty():
+                raise UserError(
+                    "MFA required",
+                    hint="pass --mfa-code <TOTP> / --mfa-recovery-code <code>, "
+                    "or set $N8N_MFA_CODE / $N8N_MFA_RECOVERY_CODE.",
+                ) from None
+            entered = getpass.getpass(f"MFA code for {resolved_email} (TOTP, 6 digits): ").strip()
+            if not entered:
+                raise UserError("MFA code required") from None
+            user = fapi.login(resolved_email, password, mfa_code=entered)
 
     emit(
         {

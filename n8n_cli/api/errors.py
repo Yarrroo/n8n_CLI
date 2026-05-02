@@ -58,6 +58,12 @@ class AuthError(CliError):
     exit_code = ExitCode.AUTH_ERROR
 
 
+class MfaRequiredError(AuthError):
+    """Raised when n8n returns 401 + code 998 — account has MFA enabled but
+    no `mfaCode` / `mfaRecoveryCode` was supplied.
+    """
+
+
 class CapabilityError(CliError):
     """Feature not available on this instance (license gate, missing endpoint)."""
 
